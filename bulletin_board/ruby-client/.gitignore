@@ -1,0 +1,21 @@
+/.bundle
+/.yardoc
+/_yardoc/
+/coverage/
+/doc/
+/pkg/
+/spec/reports/
+/tmp/
+
+# rspec failure tracking
+.rspec_status
+.rspec-failures
+
+# cached rubocop files
+.rubocop-http*
+
+# byebug history
+.byebug_history
+
+# artifacts
+/app/assets/javascripts/decidim/bulletin_board/decidim-bulletin_board.js

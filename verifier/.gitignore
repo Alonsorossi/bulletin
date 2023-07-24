@@ -1,0 +1,4 @@
+node_modules
+tmp
+
+test/fixtures/electionguard/ballot-ok.txt

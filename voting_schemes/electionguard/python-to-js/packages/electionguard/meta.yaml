@@ -1,0 +1,18 @@
+package:
+  name: electionguard
+  version: 1.2.1
+source:
+  url: file:dist/electionguard-1.2.1.tar.gz
+  patches:
+    - patches/no-cryptography.patch
+    - patches/no-multiprocessing.patch
+requirements:
+  run:
+    - hypothesis
+    - jsons
+    - rsa
+    - gmpy2
+    - pyasn1
+  test:
+  imports:
+    - electionguard

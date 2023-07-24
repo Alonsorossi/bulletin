@@ -1,0 +1,30 @@
+<%= stylesheet_link_tag "sandbox/results" %>
+
+<section class="results">
+  <div class="results__intro">
+    <div class="version">Bulletin Board Version <%= Decidim::BulletinBoard::VERSION %></div>
+
+    <h1>Results for <%= election.title.values.first %></h1>
+    <%= link_to "Back", sandbox_elections_path, class: "button" %>
+  </div>
+
+  <div class="results__content">
+    <h2>Results</h2>
+    <% election_results.each do |question, answers| %>
+      <h4><%= question %></h4>
+      <ul>
+        <% answers.each do |answer, votes| %>
+          <li><%= answer %>: <%= votes %></li>
+        <% end %>
+      </ul>
+    <% end %>
+  </div>
+
+  <div class="results__content">
+    <h2>Verifiable Results</h2>
+      <ul>
+        <li><strong>Hash</strong>: <%= verifiable_results[:hash] %></li>
+        <li><strong>File</strong>: <%= link_to "download here", verifiable_results[:url] %></li>
+      </ul>
+  </div>
+</section>

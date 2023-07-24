@@ -1,0 +1,371 @@
+name: "[CI] Server"
+on:
+  pull_request:
+    paths-ignore:
+      - docs
+      - scripts
+      - verifier
+  push:
+    branches:
+      - develop
+      - main
+      - fix/github-ci
+
+env:
+  CI: "true"
+  SIMPLECOV: "true"
+  ACTIONS_ALLOW_UNSECURE_COMMANDS: "true"
+jobs:
+  build_python_wrapper:
+    name: Build electionguard
+    runs-on: ubuntu-latest
+    container:
+      image: decidim/ruby-node-python-electionguard:ruby-3.1.1-node-16-python-3.8.11-electionguard-1.2.1
+    steps:
+      - uses: actions/checkout@v2.0.0
+        with:
+          fetch-depth: 1
+      - name: Copy local electionguard
+        run: cp -r /code/voting_schemes/electionguard/electionguard-python voting_schemes/electionguard
+
+      - name: Install pipenv
+        run: |
+          python3 -m pip install --upgrade pipenv wheel
+
+      - name: Upgrade setuptools for the virtual environment
+        working-directory: ./voting_schemes/electionguard/python-wrapper
+        run: |
+          python3 -m pipenv run echo "Initialize"
+          curl -sS https://bootstrap.pypa.io/get-pip.py | $(pipenv --py)
+          python3 -m pipenv run python -m pip install --upgrade setuptools
+      - name: Cache python wrapper
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-electionguard-python
+        with:
+          path: /cache/python
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-wrapper/**', '!voting_schemes/electionguard/python-wrapper/.venv') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Build electionguard python wrapper
+        run: |
+          make build_electionguard_python_wrapper
+          mkdir -p /cache/python
+          cp -r voting_schemes/electionguard/python-wrapper /cache/python
+          cp -r voting_schemes/electionguard/electionguard-python /cache/python
+  check_python_to_js_cache:
+    name: Check pyodide cache
+    needs: build_python_wrapper
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.save-output.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v2.0.0
+        with:
+          fetch-depth: 1
+      - name: Cache python to js
+        uses: actions/cache@v3
+        id: cache-electionguard-pyodide-assets
+        env:
+          cache-name: cache-electionguard-pyodide-assets
+        with:
+          path: /cache/python-to-js
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-to-js/**') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Save output
+        id: save-output
+        run: echo "::set-output name=cache-hit::${{ steps.cache-electionguard-pyodide-assets.outputs.cache-hit }}"
+  build_python_to_js:
+    name: Build pyodide
+    needs: check_python_to_js_cache
+    runs-on: ubuntu-latest
+    if: ${{ needs.check_python_to_js_cache.outputs.cache-hit != 'true' }}
+    container:
+      image: decidim/pyodide-electionguard:pyodide-0.16.1-electionguard-1.2.1
+    steps:
+      - uses: actions/checkout@v2.0.0
+        with:
+          fetch-depth: 1
+      - name: Cache python to js
+        uses: actions/cache@v3
+        id: cache-electionguard-pyodide-assets
+        env:
+          cache-name: cache-electionguard-pyodide-assets
+        with:
+          path: /cache/python-to-js
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-to-js/**') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Cache python wrapper
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-electionguard-python
+        with:
+          path: /cache/python
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-wrapper/**', '!voting_schemes/electionguard/python-wrapper/.venv') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Build pyodide
+        env:
+          PYODIDE_PACKAGES: "electionguard,bulletin_board-electionguard"
+        run: |
+          cp -r voting_schemes/electionguard/python-to-js/packages/* /src/pyodide/packages
+          cp -r /cache/python/electionguard-python/dist /src/pyodide/packages/electionguard
+          cp -r /cache/python/python-wrapper/dist /src/pyodide/packages/bulletin_board-electionguard
+          cd /src/pyodide && make
+      - name: Override pyodide build
+        run: |
+          cp -r voting_schemes/electionguard/python-to-js/override/* /src/pyodide/build/
+          mkdir -p /cache/python-to-js/electionguard-assets
+          cp -r /src/pyodide/build/* /cache/python-to-js/electionguard-assets
+  tests:
+    name: Unit tests
+    if: always()
+    needs: build_python_to_js
+    runs-on: ubuntu-latest
+    container:
+      image: decidim/ruby-node-python-electionguard:ruby-3.1.1-node-16-python-3.8.11-electionguard-1.2.1
+    services:
+      postgres:
+        image: postgres:11
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        env:
+          POSTGRES_PASSWORD: postgres
+    env:
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_HOST: postgres
+    steps:
+      - uses: actions/checkout@v2.0.0
+        with:
+          fetch-depth: 1
+      - name: Cache python to js
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-electionguard-pyodide-assets
+        with:
+          path: /cache/python-to-js
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-to-js/**') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Cache python wrapper
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-electionguard-python
+        with:
+          path: /cache/python
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-wrapper/**', '!voting_schemes/electionguard/python-wrapper/.venv') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Restore previous artifacts
+        run: |
+          cp -r /cache/python/electionguard-python voting_schemes/electionguard
+          cp -r /cache/python/python-wrapper voting_schemes/electionguard
+          mkdir -p voting_schemes/electionguard/ruby-adapter/public/assets/electionguard
+          cp -r /cache/python-to-js/electionguard-assets/* voting_schemes/electionguard/ruby-adapter/public/assets/electionguard
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev libgmp-dev libmpfr-dev libmpc-dev
+      - name: Cache Ruby dependencies
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-ruby-gems
+        with:
+          path: /usr/local/bundle
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('**/Gemfile.lock') }}
+      - name: Cache JS dependencies
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-node-packages
+        with:
+          path: |
+            .cache/Cypress
+            bulletin_board/server/node_modules
+            bulletin_board/js-client/node_modules
+            voting_schemes/dummy/js-adapter/node_modules
+            voting_schemes/electionguard/js-adapter/node_modules
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('**/package-lock.json') }}
+      - name: Install dependencies
+        run: make install
+      - name: Build artifacts
+        run: make build SKIP_PYODIDE=true
+      - name: Install Rubocop
+        run: gem install rubocop
+      - name: Lint Ruby files
+        run: cd bulletin_board/server && bundle exec rubocop -P
+      - name: Lint JS files
+        run: cd bulletin_board/server && npm run lint
+      - name: Format JS files
+        run: |
+          cd bulletin_board/server
+          npm run format
+          git diff --exit-code --ignore-submodules
+      - name: Create database
+        env:
+          RAILS_ENV: test
+        run: |
+          cd bulletin_board/server
+          bundle exec rails db:create
+          bundle exec rails db:migrate
+      - name: Check if GraphQL schema has changed
+        env:
+          RAILS_ENV: test
+        run: |
+          cd bulletin_board/server
+          bundle exec rails server &
+          sleep 5
+          bundle exec rake schema:generate
+          npm run schema:generate
+          git diff --exit-code --ignore-submodules
+      - name: Run Rspec tests
+        run: cd bulletin_board/server && bundle exec rake
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v1
+        with:
+          directory: ./bulletin_board/server/coverage
+  e2e:
+    name: E2E tests
+    if: always()
+    needs: [check_python_to_js_cache, build_python_to_js]
+    runs-on: ubuntu-latest
+    container:
+      image: decidim/ruby-node-python-electionguard:ruby-3.1.1-node-16-python-3.8.11-electionguard-1.2.1
+    services:
+      postgres:
+        image: postgres:11
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        env:
+          POSTGRES_PASSWORD: postgres
+      redis:
+        image: redis
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: postgres
+      DATABASE_HOST: postgres
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    steps:
+      - uses: actions/checkout@v2.0.0
+        with:
+          fetch-depth: 1
+      - name: Cache python to js
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-electionguard-pyodide-assets
+        with:
+          path: /cache/python-to-js
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-to-js/**') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Cache python wrapper
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-electionguard-python
+        with:
+          path: /cache/python
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('voting_schemes/electionguard/python-wrapper/**', '!voting_schemes/electionguard/python-wrapper/.venv') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      - name: Restore previous artifacts
+        run: |
+          cp -r /cache/python/electionguard-python voting_schemes/electionguard
+          cp -r /cache/python/python-wrapper voting_schemes/electionguard
+          mkdir -p voting_schemes/electionguard/ruby-adapter/public/assets/electionguard
+          cp -r /cache/python-to-js/electionguard-assets/* voting_schemes/electionguard/ruby-adapter/public/assets/electionguard
+      - name: Install system dependencies
+        run: sudo apt-get update --allow-releaseinfo-change && sudo apt-get install -y libpq-dev libgtk2.0-0 libgtk-3-0 libgbm-dev libnotify-dev libgconf-2-4 libnss3 libxss1 libasound2 libxtst6 xauth xvfb
+      - name: Cache Ruby dependencies
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-ruby-gems
+        with:
+          path: /usr/local/bundle
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('**/Gemfile.lock') }}
+      - name: Cache JS dependencies
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-node-packages
+        with:
+          path: |
+            .cache/Cypress
+            bulletin_board/server/node_modules
+            bulletin_board/js-client/node_modules
+            voting_schemes/dummy/js-adapter/node_modules
+            voting_schemes/electionguard/js-adapter/node_modules
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ secrets.CACHE_VERSION }}-${{ hashFiles('**/package-lock.json') }}
+      - name: Install dependencies
+        run: make install
+      - name: Build artifacts
+        run: make build
+      - name: Create database
+        env:
+          RAILS_ENV: test
+        run: |
+          cd bulletin_board/server
+          bundle exec rails db:create
+          bundle exec rails db:migrate
+      - name: Install e2e tests dependencies
+        run: |
+          make install_test_e2e
+      - name: Run e2e tests
+        run: |
+          make serve_test &
+          sleep 5
+          make test_e2e
+      - name: Upload artifacts (server logs)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: test server logs
+          path: bulletin_board/server/log/
+      - name: Upload artifacts (screenshots)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: cypress screenshots
+          path: bulletin_board/server/cypress/screenshots/
+      - name: Upload artifacts (videos)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: cypress videos
+          path: bulletin_board/server/cypress/videos/
+      - name: Upload artifacts (downloads)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: cypress downloads
+          path: bulletin_board/server/cypress/downloads/
+      - name: Clear the cypress downloads folder
+        run: rm -rf bulletin_board/server/cypress/downloads
